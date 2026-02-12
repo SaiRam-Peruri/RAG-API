@@ -124,7 +124,7 @@ def query_rag(request: QueryRequest):
     """Query company knowledge base (searches both collections)."""
     
     if not collection_auth and not collection_draft:
-        raise HTTPException(status_code=503, detail=\"ChromaDB not initialized")
+        raise HTTPException(status_code=503, detail="ChromaDB not initialized")
     
     try:
         all_results = []
