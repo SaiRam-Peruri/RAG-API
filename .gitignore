@@ -1,4 +1,7 @@
-# ChromaDB - database will be created fresh on each deployment
+# Database will be deployed with code
+
+# Source documents (already processed in chroma_db)
+Federal_Contracting/
 
 # Python
 __pycache__/

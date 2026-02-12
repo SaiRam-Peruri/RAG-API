@@ -35,14 +35,28 @@ try:
         path=CHROMA_PATH,
         settings=Settings(anonymized_telemetry=False)
     )
-    collection = client.get_or_create_collection(
-        name="federal_contracting",
+    
+    # Load both collections (authoritative and drafting)
+    collection_auth = client.get_or_create_collection(
+        name="authoritative",
         metadata={"hnsw:space": "cosine"}
     )
-    print(f"✓ ChromaDB loaded: {collection.count()} documents")
+    collection_draft = client.get_or_create_collection(
+        name="drafting",
+        metadata={"hnsw:space": "cosine"}
+    )
+    
+    total_docs = collection_auth.count() + collection_draft.count()
+    print(f"✓ ChromaDB loaded: {total_docs} documents")
+    print(f"  - authoritative: {collection_auth.count()}")
+    print(f"  - drafting: {collection_draft.count()}")
+    collection = collection_auth  # Default to authoritative for queries
+    
 except Exception as e:
     print(f"✗ ChromaDB error: {e}")
     collection = None
+    collection_auth = None
+    collection_draft = None
 
 
 class QueryRequest(BaseModel):
@@ -61,6 +75,7 @@ class AddDocumentRequest(BaseModel):
     documents: List[str]
     metadatas: Optional[List[Dict[str, Any]]] = None
     ids: Optional[List[str]] = None
+    collection: str = "authoritative"  # or "drafting"
 
 
 class AddDocumentResponse(BaseModel):
@@ -71,55 +86,92 @@ class AddDocumentResponse(BaseModel):
 
 @app.get("/")
 def home():
+    auth_count = collection_auth.count() if collection_auth else 0
+    draft_count = collection_draft.count() if collection_draft else 0
     return {
         "service": "Company RAG API",
         "status": "running",
-        "documents": collection.count() if collection else 0
+        "documents": {
+            "authoritative": auth_count,
+            "drafting": draft_count,
+            "total": auth_count + draft_count
+        }
     }
 
 
 @app.get("/health")
 def health():
-    if not collection:
+    if not collection_auth and not collection_draft:
         raise HTTPException(status_code=503, detail="ChromaDB not available")
+    
+    auth_count = collection_auth.count() if collection_auth else 0
+    draft_count = collection_draft.count() if collection_draft else 0
     
     return {
         "status": "healthy",
         "chromadb": "connected",
-        "documents": collection.count(),
-        "collection": "federal_contracting"
+        "documents": {
+            "authoritative": auth_count,
+            "drafting": draft_count,
+            "total": auth_count + draft_count
+        },
+        "collections": ["authoritative", "drafting"]
     }
 
 
 @app.post("/query", response_model=QueryResponse)
 def query_rag(request: QueryRequest):
-    """Query company knowledge base."""
+    """Query company knowledge base (searches both collections)."""
     
-    if not collection:
-        raise HTTPException(status_code=503, detail="ChromaDB not initialized")
+    if not collection_auth and not collection_draft:
+        raise HTTPException(status_code=503, detail=\"ChromaDB not initialized")
     
     try:
-        # Query ChromaDB
-        results = collection.query(
-            query_texts=[request.query],
-            n_results=request.n_results,
-            where=request.filter
-        )
+        all_results = []
         
-        # Format results
-        formatted_results = []
-        if results and results['documents'] and results['documents'][0]:
-            for i in range(len(results['documents'][0])):
-                formatted_results.append({
-                    "content": results['documents'][0][i],
-                    "metadata": results['metadatas'][0][i] if results['metadatas'] else {},
-                    "distance": results['distances'][0][i] if results['distances'] else None,
-                    "id": results['ids'][0][i] if results['ids'] else None
-                })
+        # Query authoritative collection (government docs)
+        if collection_auth:
+            results_auth = collection_auth.query(
+                query_texts=[request.query],
+                n_results=request.n_results,
+                where=request.filter
+            )
+            
+            if results_auth and results_auth['documents'] and results_auth['documents'][0]:
+                for i in range(len(results_auth['documents'][0])):
+                    all_results.append({
+                        "content": results_auth['documents'][0][i],
+                        "metadata": results_auth['metadatas'][0][i] if results_auth['metadatas'] else {},
+                        "distance": results_auth['distances'][0][i] if results_auth['distances'] else None,
+                        "id": results_auth['ids'][0][i] if results_auth['ids'] else None,
+                        "collection": "authoritative"
+                    })
+        
+        # Query drafting collection (vendor docs)
+        if collection_draft:
+            results_draft = collection_draft.query(
+                query_texts=[request.query],
+                n_results=request.n_results,
+                where=request.filter
+            )
+            
+            if results_draft and results_draft['documents'] and results_draft['documents'][0]:
+                for i in range(len(results_draft['documents'][0])):
+                    all_results.append({
+                        "content": results_draft['documents'][0][i],
+                        "metadata": results_draft['metadatas'][0][i] if results_draft['metadatas'] else {},
+                        "distance": results_draft['distances'][0][i] if results_draft['distances'] else None,
+                        "id": results_draft['ids'][0][i] if results_draft['ids'] else None,
+                        "collection": "drafting"
+                    })
+        
+        # Sort by distance (lower is better) and take top N
+        all_results.sort(key=lambda x: x['distance'] if x['distance'] is not None else float('inf'))
+        all_results = all_results[:request.n_results]
         
         return QueryResponse(
-            results=formatted_results,
-            count=len(formatted_results),
+            results=all_results,
+            count=len(all_results),
             query=request.query
         )
     
@@ -131,8 +183,19 @@ def query_rag(request: QueryRequest):
 def add_documents(request: AddDocumentRequest):
     """Add documents to the knowledge base."""
     
-    if not collection:
+    if not collection_auth and not collection_draft:
         raise HTTPException(status_code=503, detail="ChromaDB not initialized")
+    
+    # Select target collection
+    if request.collection == "authoritative":
+        target_coll = collection_auth
+    elif request.collection == "drafting":
+        target_coll = collection_draft
+    else:
+        raise HTTPException(status_code=400, detail="Invalid collection. Use 'authoritative' or 'drafting'")
+    
+    if not target_coll:
+        raise HTTPException(status_code=503, detail=f"Collection {request.collection} not available")
     
     try:
         # Generate IDs if not provided
@@ -141,16 +204,19 @@ def add_documents(request: AddDocumentRequest):
             request.ids = [str(uuid.uuid4()) for _ in request.documents]
         
         # Add documents to ChromaDB
-        collection.add(
+        target_coll.add(
             documents=request.documents,
             metadatas=request.metadatas,
             ids=request.ids
         )
         
+        auth_count = collection_auth.count() if collection_auth else 0
+        draft_count = collection_draft.count() if collection_draft else 0
+        
         return AddDocumentResponse(
-            message="Documents added successfully",
+            message=f"Documents added to {request.collection} successfully",
             added=len(request.documents),
-            total_documents=collection.count()
+            total_documents=auth_count + draft_count
         )
     
     except Exception as e:
@@ -160,13 +226,24 @@ def add_documents(request: AddDocumentRequest):
 @app.get("/stats")
 def get_stats():
     """Get database statistics."""
-    if not collection:
+    if not collection_auth and not collection_draft:
         raise HTTPException(status_code=503, detail="ChromaDB not available")
     
+    auth_count = collection_auth.count() if collection_auth else 0
+    draft_count = collection_draft.count() if collection_draft else 0
+    
     return {
-        "total_documents": collection.count(),
-        "collection_name": collection.name,
-        "metadata": collection.metadata
+        "total_documents": auth_count + draft_count,
+        "collections": {
+            "authoritative": {
+                "count": auth_count,
+                "metadata": collection_auth.metadata if collection_auth else None
+            },
+            "drafting": {
+                "count": draft_count,
+                "metadata": collection_draft.metadata if collection_draft else None
+            }
+        }
     }
 
 
