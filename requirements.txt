@@ -11,3 +11,6 @@ chromadb==0.4.22
 
 # Data validation
 pydantic==2.5.3
+
+# NumPy compatibility (ChromaDB 0.4.22 requires NumPy 1.x)
+numpy<2.0
