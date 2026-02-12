@@ -57,6 +57,18 @@ class QueryResponse(BaseModel):
     query: str
 
 
+class AddDocumentRequest(BaseModel):
+    documents: List[str]
+    metadatas: Optional[List[Dict[str, Any]]] = None
+    ids: Optional[List[str]] = None
+
+
+class AddDocumentResponse(BaseModel):
+    message: str
+    added: int
+    total_documents: int
+
+
 @app.get("/")
 def home():
     return {
@@ -113,6 +125,36 @@ def query_rag(request: QueryRequest):
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+@app.post("/add", response_model=AddDocumentResponse)
+def add_documents(request: AddDocumentRequest):
+    """Add documents to the knowledge base."""
+    
+    if not collection:
+        raise HTTPException(status_code=503, detail="ChromaDB not initialized")
+    
+    try:
+        # Generate IDs if not provided
+        if not request.ids:
+            import uuid
+            request.ids = [str(uuid.uuid4()) for _ in request.documents]
+        
+        # Add documents to ChromaDB
+        collection.add(
+            documents=request.documents,
+            metadatas=request.metadatas,
+            ids=request.ids
+        )
+        
+        return AddDocumentResponse(
+            message="Documents added successfully",
+            added=len(request.documents),
+            total_documents=collection.count()
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Add failed: {str(e)}")
 
 
 @app.get("/stats")
