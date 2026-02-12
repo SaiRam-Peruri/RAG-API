@@ -1,5 +1,4 @@
 # ChromaDB - database will be created fresh on each deployment
-chroma_db/
 
 # Python
 __pycache__/
